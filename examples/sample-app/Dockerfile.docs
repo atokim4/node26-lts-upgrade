@@ -1,0 +1,5 @@
+ARG NODE_VERSION=lts
+FROM node:${NODE_VERSION}-slim
+WORKDIR /site
+COPY . .
+RUN yarn install --frozen-lockfile && yarn build

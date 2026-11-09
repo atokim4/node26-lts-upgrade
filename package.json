@@ -1,0 +1,47 @@
+{
+  "name": "node26-lts-upgrade",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Finds what breaks when a repo moves to Node.js 26 LTS (corepack: not found, yarn missing from node:26 images, setup-node pnpm cache, removed APIs) and fixes the safe cases with --fix.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sunnatulla E.",
+  "bin": {
+    "node26-check": "skills/node26-lts-upgrade/scripts/node26check.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=skills/node26-lts-upgrade/scripts/node26check.mjs --banner:js=\"#!/usr/bin/env node\" && esbuild src/action/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=action/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run build && npm test"
+  },
+  "files": [
+    "skills/node26-lts-upgrade/scripts/node26check.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "nodejs",
+    "node26",
+    "corepack",
+    "docker",
+    "github-actions",
+    "codemod",
+    "migration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atokim4/node26-lts-upgrade.git"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/semver": "7.8.0",
+    "esbuild": "0.28.2",
+    "semver": "7.8.6",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
