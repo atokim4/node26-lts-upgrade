@@ -1,21 +1,20 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, posix } from "node:path";
 import type { FileKind, SourceFile } from "./types.ts";
 
-const SKIP_DIRS = new Set([
+export const SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".output", "vendor", "coverage", ".turbo", ".vercel",
   ".netlify", ".venv", "target", ".yarn", ".pnpm-store", "bower_components",
 ]);
-const MAX_BYTES = 1024 * 1024;
-const MAX_LOCK_BYTES = 30 * 1024 * 1024;
-const MAX_FILES = 30000;
+export const MAX_BYTES = 1024 * 1024;
+export const MAX_LOCK_BYTES = 30 * 1024 * 1024;
+export const MAX_FILES = 30000;
 
 const AGENT_DOCS = new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "copilot-instructions.md"]);
 const SOURCE_EXT = /\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/;
 
 export function classify(path: string): FileKind | undefined {
-  const name = posix.basename(path);
-  const dir = posix.dirname(path);
+  const slash = path.lastIndexOf("/");
+  const name = path.slice(slash + 1);
+  const dir = slash === -1 ? "." : path.slice(0, slash);
   if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
   if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
   if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
@@ -37,37 +36,6 @@ export interface Repo {
   root: string;
   files: SourceFile[];
   truncated: boolean;
-}
-
-export function loadRepo(root: string): Repo {
-  const files: SourceFile[] = [];
-  let walked = 0;
-  let truncated = false;
-  const walk = (dir: string, rel: string) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (walked >= MAX_FILES) { truncated = true; return; }
-      const relPath = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name), relPath);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      walked++;
-      const kind = classify(relPath);
-      if (!kind) continue;
-      const full = join(dir, e.name);
-      if (statSync(full).size > (kind === "lockfile" ? MAX_LOCK_BYTES : MAX_BYTES)) continue;
-      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
-    }
-  };
-  walk(root, "");
-  return { root, files, truncated };
 }
 
 export interface Span {

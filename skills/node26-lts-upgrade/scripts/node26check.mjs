@@ -2244,13 +2244,11 @@ var require_semver2 = __commonJS({
 
 // src/cli.ts
 import { mkdirSync, readFileSync as readFileSync2, realpathSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, join as join4, resolve } from "node:path";
+import { dirname, join as join3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 // src/fix.ts
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 var overlaps = (a, b) => {
   if (a.start === a.end || b.start === b.end) return a.start > b.start && a.start < b.end || b.start > a.start && b.start < a.end;
   return a.start < b.end && b.start < a.end;
@@ -2286,9 +2284,6 @@ function applyEdits(text, edits) {
   let out = text;
   for (const e of sorted) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return out;
-}
-function writeFixes(root, fixes) {
-  for (const f of fixes) writeFileSync(join(root, f.file), f.after);
 }
 function unifiedDiff(file, before, after, context = 3) {
   const a = before.split("\n");
@@ -2349,6 +2344,238 @@ function diffLines(a, b) {
   }
   for (let k = 0; k < tail; k++) ops.push({ kind: "=", text: a[a.length - tail + k], ai: a.length - tail + k, bi: b.length - tail + k });
   return ops;
+}
+
+// src/fs-repo.ts
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+// src/sources.ts
+var SKIP_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  ".output",
+  "vendor",
+  "coverage",
+  ".turbo",
+  ".vercel",
+  ".netlify",
+  ".venv",
+  "target",
+  ".yarn",
+  ".pnpm-store",
+  "bower_components"
+]);
+var MAX_BYTES = 1024 * 1024;
+var MAX_LOCK_BYTES = 30 * 1024 * 1024;
+var MAX_FILES = 3e4;
+var AGENT_DOCS = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "copilot-instructions.md"]);
+var SOURCE_EXT = /\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/;
+function classify(path) {
+  const slash = path.lastIndexOf("/");
+  const name = path.slice(slash + 1);
+  const dir = slash === -1 ? "." : path.slice(0, slash);
+  if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
+  if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
+  if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
+  if (name === "Jenkinsfile" || /^Jenkinsfile\./.test(name) || name.endsWith(".jenkinsfile")) return "jenkinsfile";
+  if (name === "netlify.toml") return "netlify";
+  if (name === "vercel.json") return "vercel";
+  if (name === "package.json") return "package";
+  if (name === ".nvmrc" || name === ".node-version") return "node-version";
+  if (name === "package-lock.json" || name === "npm-shrinkwrap.json" || name === "pnpm-lock.yaml") return "lockfile";
+  if (/\.(sh|bash)$/.test(name)) return "shell";
+  if (name === "Makefile" || name === "makefile" || name === "GNUmakefile" || name.endsWith(".mk")) return "makefile";
+  if (name === "Dockerfile" || name === "Containerfile" || /^Dockerfile\./.test(name) || name.endsWith(".Dockerfile")) return "dockerfile";
+  if (AGENT_DOCS.has(name)) return "agent-doc";
+  if (SOURCE_EXT.test(name) && !name.endsWith(".d.ts") && !/\.min\.[cm]?js$/.test(name)) return "source";
+  return void 0;
+}
+var YAML_SHELL_KEY = /^(\s*)(?:-\s+)?(run|script|before_script|after_script):[ \t]*(.*)$/;
+function yamlShellSpans(text) {
+  const spans = [];
+  const lines = text.split("\n");
+  const offsets = lineOffsets(lines);
+  for (let i = 0; i < lines.length; i++) {
+    const m = YAML_SHELL_KEY.exec(lines[i]);
+    if (!m) continue;
+    const indent = m[1].length;
+    const value = m[3];
+    const valueStart = offsets[i] + lines[i].length - value.length;
+    if (value && !/^[|>][-+0-9]*\s*(#.*)?$/.test(value)) {
+      const q = value[0];
+      const v = value.trimEnd();
+      if ((q === '"' || q === "'") && v.endsWith(q) && v.length > 1) spans.push({ start: valueStart + 1, end: valueStart + v.length - 1 });
+      else spans.push({ start: valueStart, end: offsets[i] + lines[i].length });
+    }
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const l = lines[j];
+      if (l.trim() === "") continue;
+      if (l.length - l.trimStart().length <= indent) break;
+    }
+    if (j > i + 1) {
+      const items = lines.slice(i + 1, j).filter((l) => l.trim() !== "");
+      if (items.length > 0 && /^\s*-\s/.test(items[0])) {
+        for (let k = i + 1; k < j; k++) {
+          const item = /^(\s*-\s+)(.*?)\s*$/.exec(lines[k]);
+          if (!item || !item[2]) continue;
+          const s = offsets[k] + item[1].length;
+          const body = item[2];
+          const quoted = body.length > 1 && (body[0] === '"' || body[0] === "'") && body.endsWith(body[0]);
+          spans.push(quoted ? { start: s + 1, end: s + body.length - 1 } : { start: s, end: s + body.length });
+        }
+      } else {
+        spans.push({ start: offsets[i + 1], end: offsets[j - 1] + lines[j - 1].length });
+      }
+      i = j - 1;
+    }
+  }
+  return spans;
+}
+function jsonStringSpans(text, keys, within) {
+  const spans = [];
+  const from = within?.start ?? 0;
+  const to = within?.end ?? text.length;
+  for (const key of keys) {
+    const re = new RegExp(`"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*"`, "g");
+    re.lastIndex = from;
+    const m = re.exec(text);
+    if (!m || m.index >= to) continue;
+    const start = m.index + m[0].length;
+    let end = start;
+    while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+    spans.push({ key, start, end });
+  }
+  return spans;
+}
+function packageScriptSpans(text) {
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const scripts = json.scripts && typeof json.scripts === "object" ? json.scripts : {};
+  const at3 = text.search(/"scripts"\s*:\s*\{/);
+  if (at3 === -1) return [];
+  const names = Object.keys(scripts).filter((n) => typeof scripts[n] === "string");
+  const close = matchingBrace(text, text.indexOf("{", at3));
+  return jsonStringSpans(text, names, { start: at3, end: close }).map((s) => ({ name: s.key, start: s.start, end: s.end }));
+}
+function vercelCommandSpans(text) {
+  return jsonStringSpans(text, ["installCommand", "buildCommand", "devCommand"]);
+}
+function netlifyCommandSpans(text) {
+  const spans = [];
+  const re = /^[ \t]*command[ \t]*=[ \t]*("""|'''|"|')/gm;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const q = m[1];
+    const start = m.index + m[0].length;
+    const end = text.indexOf(q, start);
+    if (end !== -1) spans.push({ start, end });
+  }
+  return spans;
+}
+function markdownCodeSpans(text) {
+  const spans = [];
+  const fence = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm;
+  const fenced = [];
+  for (let m = fence.exec(text); m; m = fence.exec(text)) {
+    const start = m.index + m[0].indexOf("\n") + 1;
+    spans.push({ start, end: start + m[3].length });
+    fenced.push({ start: m.index, end: m.index + m[0].length });
+  }
+  const inline = /`([^`\n]+)`/g;
+  for (let m = inline.exec(text); m; m = inline.exec(text)) {
+    const at3 = m.index;
+    if (fenced.some((f) => at3 >= f.start && at3 < f.end)) continue;
+    spans.push({ start: at3 + 1, end: at3 + 1 + m[1].length });
+  }
+  return spans.sort((a, b) => a.start - b.start);
+}
+function matchingBrace(text, open) {
+  let depth = 0;
+  let inString = false;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return text.length;
+}
+function lineOffsets(lines) {
+  const offsets = [];
+  let at3 = 0;
+  for (const l of lines) {
+    offsets.push(at3);
+    at3 += l.length + 1;
+  }
+  return offsets;
+}
+function lineOf(text, offset) {
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++;
+  return line;
+}
+function lineText(text, line) {
+  return text.split("\n")[line - 1] ?? "";
+}
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+
+// src/fs-repo.ts
+function loadRepo(root) {
+  const files = [];
+  let walked = 0;
+  let truncated = false;
+  const walk = (dir, rel) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (walked >= MAX_FILES) {
+        truncated = true;
+        return;
+      }
+      const relPath = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name), relPath);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      walked++;
+      const kind = classify(relPath);
+      if (!kind) continue;
+      const full = join(dir, e.name);
+      if (statSync(full).size > (kind === "lockfile" ? MAX_LOCK_BYTES : MAX_BYTES)) continue;
+      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
+    }
+  };
+  walk(root, "");
+  return { root, files, truncated };
+}
+function isDirectory(path) {
+  return existsSync(path) && statSync(path).isDirectory();
+}
+function writeFixes(root, fixes) {
+  for (const f of fixes) writeFileSync(join(root, f.file), f.after);
 }
 
 // src/rules.ts
@@ -2640,9 +2867,6 @@ function ruleMeta(id) {
   return r;
 }
 
-// src/scan.ts
-import { existsSync, statSync as statSync2 } from "node:fs";
-
 // src/commands.ts
 var WRAPPERS = /* @__PURE__ */ new Set(["sudo", "exec", "time", "command", "env", "nohup", "then", "do", "else", "if", "while", "until", "!", "$", ">", "-", "{", "}"]);
 function segments(text, start, end, quotesSplit) {
@@ -2901,227 +3125,6 @@ function describe(runtime) {
   return `${runtime.label} (Node ${runtime.major})`;
 }
 
-// src/sources.ts
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join as join2, posix } from "node:path";
-var SKIP_DIRS = /* @__PURE__ */ new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  ".next",
-  ".nuxt",
-  ".output",
-  "vendor",
-  "coverage",
-  ".turbo",
-  ".vercel",
-  ".netlify",
-  ".venv",
-  "target",
-  ".yarn",
-  ".pnpm-store",
-  "bower_components"
-]);
-var MAX_BYTES = 1024 * 1024;
-var MAX_LOCK_BYTES = 30 * 1024 * 1024;
-var MAX_FILES = 3e4;
-var AGENT_DOCS = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "copilot-instructions.md"]);
-var SOURCE_EXT = /\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/;
-function classify(path) {
-  const name = posix.basename(path);
-  const dir = posix.dirname(path);
-  if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
-  if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
-  if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
-  if (name === "Jenkinsfile" || /^Jenkinsfile\./.test(name) || name.endsWith(".jenkinsfile")) return "jenkinsfile";
-  if (name === "netlify.toml") return "netlify";
-  if (name === "vercel.json") return "vercel";
-  if (name === "package.json") return "package";
-  if (name === ".nvmrc" || name === ".node-version") return "node-version";
-  if (name === "package-lock.json" || name === "npm-shrinkwrap.json" || name === "pnpm-lock.yaml") return "lockfile";
-  if (/\.(sh|bash)$/.test(name)) return "shell";
-  if (name === "Makefile" || name === "makefile" || name === "GNUmakefile" || name.endsWith(".mk")) return "makefile";
-  if (name === "Dockerfile" || name === "Containerfile" || /^Dockerfile\./.test(name) || name.endsWith(".Dockerfile")) return "dockerfile";
-  if (AGENT_DOCS.has(name)) return "agent-doc";
-  if (SOURCE_EXT.test(name) && !name.endsWith(".d.ts") && !/\.min\.[cm]?js$/.test(name)) return "source";
-  return void 0;
-}
-function loadRepo(root) {
-  const files = [];
-  let walked = 0;
-  let truncated = false;
-  const walk = (dir, rel) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (walked >= MAX_FILES) {
-        truncated = true;
-        return;
-      }
-      const relPath = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) walk(join2(dir, e.name), relPath);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      walked++;
-      const kind = classify(relPath);
-      if (!kind) continue;
-      const full = join2(dir, e.name);
-      if (statSync(full).size > (kind === "lockfile" ? MAX_LOCK_BYTES : MAX_BYTES)) continue;
-      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
-    }
-  };
-  walk(root, "");
-  return { root, files, truncated };
-}
-var YAML_SHELL_KEY = /^(\s*)(?:-\s+)?(run|script|before_script|after_script):[ \t]*(.*)$/;
-function yamlShellSpans(text) {
-  const spans = [];
-  const lines = text.split("\n");
-  const offsets = lineOffsets(lines);
-  for (let i = 0; i < lines.length; i++) {
-    const m = YAML_SHELL_KEY.exec(lines[i]);
-    if (!m) continue;
-    const indent = m[1].length;
-    const value = m[3];
-    const valueStart = offsets[i] + lines[i].length - value.length;
-    if (value && !/^[|>][-+0-9]*\s*(#.*)?$/.test(value)) {
-      const q = value[0];
-      const v = value.trimEnd();
-      if ((q === '"' || q === "'") && v.endsWith(q) && v.length > 1) spans.push({ start: valueStart + 1, end: valueStart + v.length - 1 });
-      else spans.push({ start: valueStart, end: offsets[i] + lines[i].length });
-    }
-    let j = i + 1;
-    for (; j < lines.length; j++) {
-      const l = lines[j];
-      if (l.trim() === "") continue;
-      if (l.length - l.trimStart().length <= indent) break;
-    }
-    if (j > i + 1) {
-      const items = lines.slice(i + 1, j).filter((l) => l.trim() !== "");
-      if (items.length > 0 && /^\s*-\s/.test(items[0])) {
-        for (let k = i + 1; k < j; k++) {
-          const item = /^(\s*-\s+)(.*?)\s*$/.exec(lines[k]);
-          if (!item || !item[2]) continue;
-          const s = offsets[k] + item[1].length;
-          const body = item[2];
-          const quoted = body.length > 1 && (body[0] === '"' || body[0] === "'") && body.endsWith(body[0]);
-          spans.push(quoted ? { start: s + 1, end: s + body.length - 1 } : { start: s, end: s + body.length });
-        }
-      } else {
-        spans.push({ start: offsets[i + 1], end: offsets[j - 1] + lines[j - 1].length });
-      }
-      i = j - 1;
-    }
-  }
-  return spans;
-}
-function jsonStringSpans(text, keys, within) {
-  const spans = [];
-  const from = within?.start ?? 0;
-  const to = within?.end ?? text.length;
-  for (const key of keys) {
-    const re = new RegExp(`"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*"`, "g");
-    re.lastIndex = from;
-    const m = re.exec(text);
-    if (!m || m.index >= to) continue;
-    const start = m.index + m[0].length;
-    let end = start;
-    while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-    spans.push({ key, start, end });
-  }
-  return spans;
-}
-function packageScriptSpans(text) {
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return [];
-  }
-  const scripts = json.scripts && typeof json.scripts === "object" ? json.scripts : {};
-  const at3 = text.search(/"scripts"\s*:\s*\{/);
-  if (at3 === -1) return [];
-  const names = Object.keys(scripts).filter((n) => typeof scripts[n] === "string");
-  const close = matchingBrace(text, text.indexOf("{", at3));
-  return jsonStringSpans(text, names, { start: at3, end: close }).map((s) => ({ name: s.key, start: s.start, end: s.end }));
-}
-function vercelCommandSpans(text) {
-  return jsonStringSpans(text, ["installCommand", "buildCommand", "devCommand"]);
-}
-function netlifyCommandSpans(text) {
-  const spans = [];
-  const re = /^[ \t]*command[ \t]*=[ \t]*("""|'''|"|')/gm;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const q = m[1];
-    const start = m.index + m[0].length;
-    const end = text.indexOf(q, start);
-    if (end !== -1) spans.push({ start, end });
-  }
-  return spans;
-}
-function markdownCodeSpans(text) {
-  const spans = [];
-  const fence = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm;
-  const fenced = [];
-  for (let m = fence.exec(text); m; m = fence.exec(text)) {
-    const start = m.index + m[0].indexOf("\n") + 1;
-    spans.push({ start, end: start + m[3].length });
-    fenced.push({ start: m.index, end: m.index + m[0].length });
-  }
-  const inline = /`([^`\n]+)`/g;
-  for (let m = inline.exec(text); m; m = inline.exec(text)) {
-    const at3 = m.index;
-    if (fenced.some((f) => at3 >= f.start && at3 < f.end)) continue;
-    spans.push({ start: at3 + 1, end: at3 + 1 + m[1].length });
-  }
-  return spans.sort((a, b) => a.start - b.start);
-}
-function matchingBrace(text, open) {
-  let depth = 0;
-  let inString = false;
-  for (let i = open; i < text.length; i++) {
-    const c = text[i];
-    if (inString) {
-      if (c === "\\") i++;
-      else if (c === '"') inString = false;
-    } else if (c === '"') inString = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) return i;
-  }
-  return text.length;
-}
-function lineOffsets(lines) {
-  const offsets = [];
-  let at3 = 0;
-  for (const l of lines) {
-    offsets.push(at3);
-    at3 += l.length + 1;
-  }
-  return offsets;
-}
-function lineOf(text, offset) {
-  let line = 1;
-  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++;
-  return line;
-}
-function lineText(text, line) {
-  return text.split("\n")[line - 1] ?? "";
-}
-function parseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return void 0;
-  }
-}
-
 // src/contexts.ts
 function newEnv(id, file, where, runtime, image = false) {
   return { id, file, where, image, runtime, preinstalled: /* @__PURE__ */ new Set(), installs: [], users: [], commands: [] };
@@ -3180,7 +3183,7 @@ function availableAt(env, at3, tool, options = {}) {
   return env.parent ? availableAt(env.parent, Number.POSITIVE_INFINITY, tool, options) : false;
 }
 var maskJsonEscapes = (text) => text.replace(/\\(["\\])/g, " $1");
-var join3 = (dir, name) => dir ? `${dir}/${name}` : name;
+var join2 = (dir, name) => dir ? `${dir}/${name}` : name;
 function ancestors(path) {
   const parts = path.split("/").slice(0, -1);
   const out = [];
@@ -3189,13 +3192,13 @@ function ancestors(path) {
 }
 function pinIn(files, dir = "") {
   for (const name of [".nvmrc", ".node-version"]) {
-    const path = join3(dir, name);
+    const path = join2(dir, name);
     const f = files.find((x) => x.path === path);
     const v = f?.text.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"));
     const r = v ? fromSpec(v, `${path} ${v}`) : void 0;
     if (r) return r;
   }
-  const pkg = files.find((f) => f.path === join3(dir, "package.json"));
+  const pkg = files.find((f) => f.path === join2(dir, "package.json"));
   const json = pkg ? parseJson(pkg.text) : void 0;
   if (typeof json?.volta?.node === "string") {
     const r = fromSpec(json.volta.node, `volta.node ${json.volta.node}`);
@@ -3219,7 +3222,7 @@ function runtimeEntry(json) {
   return typeof node?.version === "string" ? node.version : void 0;
 }
 function packageManagerOf(files, dir = "") {
-  const pkg = files.find((f) => f.path === join3(dir, "package.json"));
+  const pkg = files.find((f) => f.path === join2(dir, "package.json"));
   const json = pkg ? parseJson(pkg.text) : void 0;
   if (!pkg || !json) return void 0;
   const raw = typeof json.packageManager === "string" ? json.packageManager : void 0;
@@ -4298,13 +4301,10 @@ function checkNodeModulesCacheKey(model) {
 // src/types.ts
 var SEVERITY_ORDER = { error: 3, warning: 2, note: 1 };
 
-// src/scan.ts
-function isDirectory(path) {
-  return existsSync(path) && statSync2(path).isDirectory();
-}
-function scan(root, options = {}) {
+// src/engine.ts
+function scanRepo(repo, options = {}) {
+  const root = repo.root;
   const exclude = options.exclude ?? [];
-  const repo = loadRepo(root);
   const model = buildModel(repo.files);
   const findings = [
     ...checkCorepack(model),
@@ -4337,6 +4337,13 @@ function counts(findings) {
 
 // src/report/text.ts
 import { relative } from "node:path";
+
+// src/scan.ts
+function scan(root, options = {}) {
+  return scanRepo(loadRepo(root), options);
+}
+
+// src/report/text.ts
 var COLORS = { error: "\x1B[31m", warning: "\x1B[33m", note: "\x1B[36m" };
 var RESET = "\x1B[0m";
 var DIM = "\x1B[2m";
@@ -4408,7 +4415,7 @@ function markdownReport(result, options = {}) {
 }
 
 // src/version.ts
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
 var TOOL_NAME = "node26-lts-upgrade";
 var REPO_URL = "https://github.com/atokim4/node26-lts-upgrade";
 
@@ -4518,7 +4525,7 @@ function render(result, format, color) {
 }
 function readAll(root, files) {
   const texts = /* @__PURE__ */ new Map();
-  for (const f of files) texts.set(f, readFileSync2(join4(root, f), "utf8"));
+  for (const f of files) texts.set(f, readFileSync2(join3(root, f), "utf8"));
   return texts;
 }
 function diffText(fixes) {

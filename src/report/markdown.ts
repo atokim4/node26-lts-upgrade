@@ -1,5 +1,5 @@
 import { ruleMeta } from "../rules.ts";
-import { counts, type ScanResult } from "../scan.ts";
+import { counts, type ScanResult } from "../engine.ts";
 import { NONE } from "./text.ts";
 
 const ICON = { error: "Error", warning: "Warning", note: "Note" } as const;

@@ -1,6 +1,6 @@
 {
   "name": "node26-lts-upgrade",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Finds what breaks when a repo moves to Node.js 26 LTS (corepack: not found, yarn missing from node:26 images, setup-node pnpm cache, removed APIs) and fixes the safe cases with --fix.",
   "type": "module",

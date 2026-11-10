@@ -1,5 +1,7 @@
 # Fix `corepack: not found` and other Node 26 LTS breaks in 1 command
 
+No install: [check a public repo in the browser](https://upgrade-check-2026.netlify.app) (same engine, runs in the tab, reads up to 60 files; the CLI reads everything).
+
 Node.js 26 became the Active LTS on 2026-10-28 (26.13.0). Every floating name moved with it: `node:lts`,
 `node:lts-alpine`, `lts/*` in setup-node and `.nvmrc`. Builds that worked last week now fail, and the cause
 is often two releases back:
